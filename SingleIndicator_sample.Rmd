@@ -1,0 +1,210 @@
+---
+title: "1N200T60H"
+author: "Hyungeun Oh"
+date: "2023-06-22"
+output:
+  pdf_document: default
+  html_document: default
+---
+```{r setup, include=FALSE}
+getwd()
+setwd("/Users/hyungeun/R/S")
+library(MASS)
+library(mvtnorm)
+library(Matrix)
+library(BiocManager)
+library(coda)   
+library(MplusAutomation)
+library(rstudioapi)
+library(matrixStats)
+source('postcalc.R') # to summarize Bayesian estimation results
+source('mplus.r')  # to generate plots
+library(sp)
+library(knitr)
+knitr::opts_chunk$set(echo = FALSE, message = F, warning = F, fig.show = 'hold', out.width = '50%')
+```
+
+# Single-indicator
+## High Reliability ############################################################
+### Correct Model Fitting (Data with ME ==> Fit MEVAR) #########################
+####1. N=200, T=60
+```{r, include=FALSE}
+np=200;#number of subjects
+nt = nt #number of time points
+nx = 3 #number of person-level covariates (including intercept)
+nf = 2 #number of latent factors (f1,f2)
+condition=1
+
+if(condition == 1){ny_perf = 1 }
+if(condition == 3){ny_perf = 3 }
+ny = nf*ny_perf #number of total indicators
+
+##### lambda
+if(condition == 1){
+  Lambda = matrix(c(1,0,
+                    0,1),ncol = nf)
+  ny_perf = 1
+}
+if(condition == 3){
+  Lambda = matrix(c(1,0,
+                    0.8,0,
+                    0.9,0,
+                    
+                    0,1,
+                    0,0.92,
+                    0,0.88),ncol=nf,byrow=TRUE)
+  ny_perf = 3
+}
+
+# A covariates matrix (including intercept)
+A = matrix(rep(NA, np*nx), nrow = np, ncol=nx)
+for (i in 1:np) {
+  A[i,] <- c(1, rnorm(n = nx-1, mean = 0,sd = .4)) 
+}
+AforInter = A
+AforAR = A
+AforlogSD_VAR = A
+Aforcorr_VAR = A
+cov1 = AforInter[,2] 
+cov2 = AforInter[,3]
+CoeffMu1 = c(2.6,0,0) 
+CoeffMu2 = c(2.1,0,0) 
+Coeffa11 = c(.34,0,0)   
+Coeffa22 = c(.39,0,0) 
+Coeffb12 = c(.042,0,0) 
+Coeffb21 = c(-.002,0,0) 
+CoefflogSD_VAR_1 = c(.30,0,0) 
+CoefflogSD_VAR_2 = c(.24,0,0) 
+Coeffcorr_VAR = c(0,0,0)   
+CoeffInter = matrix(rep(0,nx*nf), ncol=nf)  
+CoeffAR = array(rep(0,nx*nf*nf),c(nx,nf,nf))  
+CoefflogSD_VAR = matrix(rep(0,nx*nf), ncol=nf)
+CoeffInter[,1] = CoeffMu1
+CoeffInter[,2] = CoeffMu2
+CoeffAR[,1,1] = Coeffa11 
+CoeffAR[,2,2] = Coeffa22
+CoeffAR[,1,2] = Coeffb12
+CoeffAR[,2,1] = Coeffb21
+CoefflogSD_VAR[, 1] = CoefflogSD_VAR_1
+CoefflogSD_VAR[, 2] = CoefflogSD_VAR_2
+
+lsigmas = c(log(1.2),log(1.2)) 
+S <- diag(exp(lsigmas)) 
+#R_values <- c(0.00001) #This lead to zero variance of F
+R <- diag(rep(1, ny), nrow=ny) 
+Sigma_VAR <- S %*% R %*% S
+
+
+####################### Condition box start ####################################
+np=200  #number of people 
+ntt=60  #number of time-points
+discard=150 #@@@@number of time points to discard
+nt = ntt + discard  #@@@@
+condition = 1  #ny_perf = one indicator per latent variable f.
+####################### population psi.mu.sqrd (intercept var) #################
+sigmaInter = sqrt(2.5) # set ==> low.rel=sqrt(4), high.rel=sqrt(2.5)
+sigmaAR = 0.1;random_SD = diag(c(rep(sigmaInter,2),rep(sigmaAR,4)));random_corr = diag(1,6)
+bcov = random_SD %*% random_corr %*% random_SD
+psi.mu.sqrd = diag(diag(bcov)[1:ny], ny) #using ny to automatically make the dimension
+####################### extent of measurement error ############################
+Sigma_omega = diag(rep(.4, ny), nrow=ny) # set ==> low.rel=3, high.rel=.4
+####################### Condition box end ######################################
+
+```
+                             
+
+```{r}
+############ Generating the data with replications #############################
+reps = 100
+############
+  for(rp in 1:reps){
+    dir.create(paste0('/Users/hyungeun/R/S/1N200T60H_',rp,'/')) 
+              #1=single-indicator,N=people, T=time, L=Low Reliability
+    set.seed(1000 + rp)
+    
+     #Simulate data
+      f = array(rep(0, np*nt*nf), c(np,nt,nf))  # latent factor variable
+      y = array(rep(0, np*nt*ny), c(np,nt,ny)) # observed Y, basically Y + measurement errors
+      muy = array(rep(0, np*nt*ny), c(np,nt,ny)) # mean of Y
+      muInter = matrix(rep(0,np*nf),nrow = np)   # mean of person-specific intercepts
+      intercept = matrix(rep(0,np*nf),nrow = np) # person-specific intercepts
+      muAR = array(rep(0, np*nf*nf), c(np,nf,nf)) # mean of person-specific AR coeff
+      AR = array(rep(0, np*nf*nf), c(np,nf,nf))  # person-specific AR coeff
+      bmu = matrix(rep(0,np*(nf^2+nf)),nrow = np) # mean of person-specific intercepts & CR
+      b = matrix(rep(0,np*(nf^2+nf)),nrow = np) # person-specific intercepts & CR coeff
+      
+    for(i in 1:np){
+        #values at t=1
+        f[i,,] = rnorm(nf,0,0.4) 
+        for (d in 1:nf){
+        muInter[i,d] = sum(CoeffInter[,d]*AforInter[i,])
+        for(d2 in 1:nf){
+          muAR[i, d, d2] = sum(CoeffAR[,d,d2]*AforAR[i,])
+        }
+      }
+    bmu[i,1:2] = muInter[i,1:2]
+    bmu[i,3] = muAR[i,1,1] #a11
+    bmu[i,4] = muAR[i,2,2] #a22
+    bmu[i,5] = muAR[i,1,2] #b12
+    bmu[i,6] = muAR[i,2,1] #b21
+    b[i,1:6] = mvrnorm(1,bmu[i,1:6],bcov)
+    intercept[i,1:2] = b[i,1:2]
+    AR[i,1,1] = b[i,3] #a11
+    AR[i,2,2] = b[i,4] #a22
+    AR[i,1,2] = b[i,5] #b12
+    AR[i,2,1] = b[i,6] #b21
+}
+  
+  for(i in 1:np){
+    for(t in 2:nt){ #Loops from t = 2 to the total number of time points T
+      f[i,t,] = intercept[i,] + AR[i, ,] %*% (f[i,t-1,] - intercept[i,]) + mvrnorm(n = 1, mu =rep(0,nf), Sigma = Sigma_VAR)
+      y[i,t,] =  Lambda%*%f[i,t,] +  mvrnorm(n = 1, mu = rep(0,ny), Sigma = Sigma_omega)
+    }
+  } 
+
+
+f = f[, (discard+1):nt, ]
+y = y[, (discard+1):nt, ]
+ntt=nt-discard
+
+
+      
+repdata = matrix(NA,nrow = np*ntt, ncol = (ny_perf*nf) + 2)
+for(i in 1:np){
+  repdata[((i-1)*ntt+1):(i*ntt),1] = rep(i,ntt)  #ID 
+  repdata[((i-1)*ntt+1):(i*ntt),2] = rep(cov1[i],ntt) #covariates
+  for (j in 3:(2+(ny_perf*nf))){
+  paste0("\nj = ", j)
+  repdata[((i-1)*ntt+1):(i*ntt),j] = y[i,,j-2] # y_{j}
+  }
+}
+
+save(np, ntt, nx, nf, ny_perf, ny, y, f,
+       AforAR, Aforcorr_VAR, AforInter, AforlogSD_VAR,
+       CoeffAR, CoeffInter, Coeffcorr_VAR, CoefflogSD_VAR,
+       sigmaInter, sigmaAR,
+       AR, intercept, R, S, Sigma_VAR, 
+       muInter, muAR, Sigma_omega, Lambda,
+       file=paste0('/Users/hyungeun/R/S/1N200T60H_',rp,'/sim',rp,".Rdata"))
+
+write.table(repdata, file=paste0('/Users/hyungeun/R/S/1N200T60H_',rp,'/sim',rp,".dat"), row.names = FALSE, col.names = FALSE, sep = "\t")
+}
+
+
+############## Data check ##############
+f = f[,1:ntt,];f1 = f[,,1];f2 = f[,,2]
+dim(f1);dim(f2)
+y = y[,1:ntt,];y1 = y[,,1];y2 = y[,,2]
+dim(y1);dim(y2)
+
+#contrast
+y_range <- range(c(f1, f2, y1, y2)) 
+# f1 vs y1
+plot(f1[1,],type="l",ylim=y_range); for(i in 2:np){lines(f1[i,])}; plot(y1[1,],type="l",ylim=y_range); for(i in 2:np){lines(y1[i,])}
+# f2 vs y2
+plot(f2[1,],type="l",ylim=y_range); for(i in 2:np){lines(f2[i,])};plot(y2[1,],type="l",ylim=y_range); for(i in 2:np){lines(y2[i,])}
+
+plot(f1[1,],type="l",ylim=y_range);  plot(y1[1,],type="l",ylim=y_range); #1st person
+plot(f1[200,],type="l",ylim=y_range);  plot(y1[200,],type="l",ylim=y_range); #200th person
+```
+
